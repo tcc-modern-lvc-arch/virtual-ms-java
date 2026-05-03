@@ -1,0 +1,63 @@
+{
+  "repo_notes": [
+    {
+      "content": "This is virtual-areas-ms-java, a Spring Boot 4 microservice that manages geofenced virtual areas for an LVC (Live-Virtual-Constructive) Smart Cities simulation platform. It follows strict hexagonal architecture (ports & adapters): the domain layer has zero framework imports and uses JTS for geometry. The application layer holds the core business logic. The infrastructure layer contains all Spring, JPA, gRPC, and Vaadin adapters.\n\nThe three pillars of the domain are: (1) Area management — three area shapes: POLYGON (JTS), CIRCLE (haversine radius), CORRIDOR (minimum distance to a polyline segment); (2) EntityState — write-side source of truth for which simulation entities (DRONE, BUS, VESSEL) are inside which areas, stored in MariaDB; (3) Event dispatching — area transition events (Checkin/Checkout) are pushed to an EventHub gRPC service and projected into InfluxDB.\n\nThe service exposes a REST API (port 8082), a gRPC AreaService (port 50052), and a Vaadin 25 UI. Proto definitions are managed in a shared proto-shared/ Maven module at the TCC root. Flyway handles schema migrations."
+    },
+    {
+      "content": "Critical directories to document: virtual-areas/src/main/java/ contains all source code. The package root is something like br.mackenzie.tcc (or similar). Key sub-packages: domain/area, domain/poi, domain/entity, domain/event, domain/geofence, domain/exception, application/service, application/exception, infrastructure/config, infrastructure/output/persistence/mariadb, infrastructure/output/persistence/influxdb, infrastructure/output/grpc, infrastructure/adapter/web, infrastructure/adapter/grpc, infrastructure/ui. Flyway migrations live in virtual-areas/src/main/resources/db/migration/."
+    }
+  ],
+  "pages": [
+    {
+      "title": "Architecture Overview",
+      "purpose": "High-level hexagonal architecture diagram and explanation: how domain, application, and infrastructure layers relate; port/adapter boundaries; technology stack (Spring Boot 4, Java 24+, JTS, gRPC, MariaDB, InfluxDB, Vaadin 25); how this service fits in the broader TCC LVC simulation platform alongside EventHub, constructive-airsim-ms-python, and infra-local-shared"
+    },
+    {
+      "title": "Domain Layer",
+      "purpose": "Document all domain model classes, sealed hierarchies, and pure-Java ports. Cover: Area (sealed: PolygonArea, CircleArea, CorridorArea) and AreaPort; PointOfInterest and PointOfInterestPort; EntityState and EntityStatePort; AreaTransitionEvent (sealed: Checkin, Checkout), EventDispatchPort, SimulationEventPort, InfluxProjectionPort, TransitionRecord, LvcOrigin; DomainException sealed hierarchy. Emphasize zero framework imports.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Geofencing Logic",
+      "purpose": "Deep-dive into GeofenceCalculator and Coordinate: how POLYGON containment is computed with JTS, how CIRCLE uses haversine distance, how CORRIDOR uses minimum perpendicular distance to polyline segments. Include the three seeded area shapes and their real-world OSM identifiers. Document the GeofenceMonitoringService application service that orchestrates entity position checks and fires transition events.",
+      "parent": "Domain Layer"
+    },
+    {
+      "title": "Application Services",
+      "purpose": "Document the three application services: AreaManagementService (CRUD for areas and POIs, calls AreaPort), GeofenceMonitoringService (core geofence evaluation loop, position input → EntityState diff → transition event dispatch), EventSimulationService (Vaadin-facing manual simulation trigger). Cover the ApplicationException sealed hierarchy.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Infrastructure — Persistence",
+      "purpose": "Document MariaDB and InfluxDB adapters. MariaDB: AreaEntity, PoiEntity (JPA with @JdbcTypeCode JSON for coordinate arrays), EntityStateMariadbAdapter (JdbcTemplate upsert with ON DUPLICATE KEY UPDATE, composite PK entity_id+entity_type+area_id). InfluxDB: InfluxDbProjectionAdapter (write area_transitions measurements with tags area_id/entity_type/lvc/transition and fields entity_id/area_name/lat/lon; Flux query for history). Include Flyway migration list.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Infrastructure — gRPC Integration",
+      "purpose": "Document both gRPC roles: (1) Client — EventHubGrpcAdapter implements EventDispatchPort and SimulationEventPort to publish AreaTransitionEvents to the EventHub service; EventHubSubscriberAdapter starts one virtual thread per entity type at startup (InitializingBean) with a persistent subscription stream and auto-reconnect. (2) Server — AreaGrpcService implements the AreaServiceGrpc stub on port 50052, used by constructive-airsim-ms-python to check drone area membership. Cover EventHubGrpcConfiguration (ManagedChannel, stubs as Spring beans) and EventHubProperties.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "REST API",
+      "purpose": "Document all REST endpoints exposed by AreaController, PoiController, and SimulationController. Cover request/response DTOs, OpenAPI interface contracts (api/ package), HTTP status codes, and the GlobalExceptionHandler mapping. Reference Swagger UI at /swagger-ui.html.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Vaadin UI",
+      "purpose": "Document the Vaadin 25 UI: MainLayout (navigation shell), AreaManagementView (create/edit/delete areas with shape-specific coordinate forms), PoiManagementView (POI CRUD), SimulationView (manual entity position submission via EventSimulationService), MonitoringView (live area membership display). Explain how the UI ties into the application layer without bypassing hexagonal boundaries.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Proto Definitions & Code Generation",
+      "purpose": "Document the proto-shared/ shared Maven module. Describe event.proto (EventHub service — client stubs used here) and virtual_areas.proto (AreaService — server stubs used here). Explain the build order (proto-shared mvn install before app build) and how generated stubs are consumed in the infrastructure layer."
+    },
+    {
+      "title": "Database Schema & Migrations",
+      "purpose": "Document the MariaDB virtual_areas database schema via the Flyway migration scripts in src/main/resources/db/migration/. List each migration file, the tables it creates/alters, and the seeded data (five predefined areas: Mackenzie Campus POLYGON, Rua da Consolação CORRIDOR, Consolação Neighborhood POLYGON, Caio Prado Stop CIRCLE/MISSION_TRIGGER, Santos Port CIRCLE). Include the InfluxDB bucket name and measurement schema."
+    },
+    {
+      "title": "Configuration & Deployment",
+      "purpose": "Document application.properties / application.yml configuration: DataSource (MariaDB virtual_areas DB, user virtual_areas), InfluxDB connection (InfluxDbProperties), EventHub gRPC target (EventHubProperties), Vaadin settings, server port 8082, gRPC server port 50052. Cover the infra-local-shared docker compose stack that starts all dependencies. Explain the two-step build (proto-shared then app)."
+    }
+  ]
+}
