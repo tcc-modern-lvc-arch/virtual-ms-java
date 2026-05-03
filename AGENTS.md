@@ -1,4 +1,4 @@
-# agents.md — virtual-areas-ms-java
+# agents.md — virtual-ms-java
 
 ## Commands
 
