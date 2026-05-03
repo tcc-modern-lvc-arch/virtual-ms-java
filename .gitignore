@@ -5,6 +5,8 @@ target/
 
 # Vaadin
 **/frontend/generated/
+**/frontend/index.html
+**/bundles/
 node_modules/
 **/.vaadin/
 
