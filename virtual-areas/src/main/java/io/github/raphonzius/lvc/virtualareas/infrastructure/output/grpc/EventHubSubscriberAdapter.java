@@ -119,6 +119,10 @@ public class EventHubSubscriberAdapter implements InitializingBean, DisposableBe
 
     private void handleMove(EventRequest event) {
         try {
+            // VIRTUAL events are published by EventSimulationService and already processed
+            // directly there — skip to avoid double-writing to DB and InfluxDB
+            if (event.getLvc() == io.github.raphonzius.lvc.proto.event.LvcOrigin.VIRTUAL) return;
+
             Location loc = switch (event.getPayloadCase()) {
                 case DRONE -> event.getDrone().getLocation();
                 case BUS -> event.getBus().getLocation();
