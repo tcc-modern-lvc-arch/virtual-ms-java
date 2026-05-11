@@ -1,5 +1,26 @@
--- Mackenzie Campus — POLYGON, DRONE monitoring (simplified OSM 38629632)
-INSERT INTO areas (id, name, description, area_type, coordinates, radius_meters, monitored_entity_types, action, active)
+-- Idempotent seed for points_of_interest + areas.
+-- Insert POIs first so areas.target_poi_id FK is satisfied at insert time.
+
+-- ── Points of Interest ────────────────────────────────────────────────────────
+
+-- Caio Prado / Consolação bus stop, used as the MISSION_TRIGGER target POI.
+INSERT IGNORE INTO points_of_interest (id, name, description, poi_type, latitude, longitude, altitude_m, metadata, active)
+VALUES ('b2c3d4e5-0001-0000-0000-000000000000',
+        'Caio Prado / Consolação',
+        'Ponto de ônibus — Caio Prado com Consolação',
+        'MISSION_TARGET',
+        -23.5482453,
+        -46.6520375,
+        NULL,
+        NULL,
+        TRUE);
+
+-- ── Areas ─────────────────────────────────────────────────────────────────────
+
+-- Mackenzie Campus — POLYGON, DRONE monitoring, drone patrol boundary
+-- (simplified OSM 38629632)
+INSERT IGNORE INTO areas (id, name, description, area_type, coordinates, radius_meters,
+                          monitored_entity_types, action, target_poi_id, patrol_zone, active)
 VALUES ('a1b2c3d4-0001-0000-0000-000000000000',
         'Mackenzie Campus',
         'Universidade Presbiteriana Mackenzie — Rua da Consolação 896, São Paulo',
@@ -8,10 +29,14 @@ VALUES ('a1b2c3d4-0001-0000-0000-000000000000',
         NULL,
         '["DRONE"]',
         'CHECKIN_CHECKOUT',
+        NULL,
+        TRUE,
         TRUE);
 
--- Rua da Consolação — CORRIDOR 20m half-width, BUS monitoring (simplified OSM 333172735)
-INSERT INTO areas (id, name, description, area_type, coordinates, radius_meters, monitored_entity_types, action, active)
+-- Rua da Consolação — CORRIDOR 20m half-width, BUS monitoring
+-- (simplified OSM 333172735)
+INSERT IGNORE INTO areas (id, name, description, area_type, coordinates, radius_meters,
+                          monitored_entity_types, action, target_poi_id, patrol_zone, active)
 VALUES ('a1b2c3d4-0002-0000-0000-000000000000',
         'Rua da Consolação',
         'Corredor viário — Av. Paulista até Largo do Arouche',
@@ -20,10 +45,13 @@ VALUES ('a1b2c3d4-0002-0000-0000-000000000000',
         20.0,
         '["BUS"]',
         'CHECKIN_CHECKOUT',
+        NULL,
+        FALSE,
         TRUE);
 
 -- Consolação Neighborhood — POLYGON, BUS monitoring (simplified OSM 2731076)
-INSERT INTO areas (id, name, description, area_type, coordinates, radius_meters, monitored_entity_types, action, active)
+INSERT IGNORE INTO areas (id, name, description, area_type, coordinates, radius_meters,
+                          monitored_entity_types, action, target_poi_id, patrol_zone, active)
 VALUES ('a1b2c3d4-0003-0000-0000-000000000000',
         'Consolação Neighborhood',
         'Bairro da Consolação — São Paulo',
@@ -32,22 +60,29 @@ VALUES ('a1b2c3d4-0003-0000-0000-000000000000',
         NULL,
         '["BUS"]',
         'CHECKIN_CHECKOUT',
+        NULL,
+        FALSE,
         TRUE);
 
--- Caio Prado C/B Stop Area — CIRCLE 80m, BUS MISSION_TRIGGER
-INSERT INTO areas (id, name, description, area_type, coordinates, radius_meters, monitored_entity_types, action, active)
+-- Caio Prado C/B Stop Area — CIRCLE 80m, BUS MISSION_TRIGGER → Caio Prado POI
+-- Coordinates from OpenStreetMap (Rua Caio Prado bus stop, Consolação).
+INSERT IGNORE INTO areas (id, name, description, area_type, coordinates, radius_meters,
+                          monitored_entity_types, action, target_poi_id, patrol_zone, active)
 VALUES ('a1b2c3d4-0004-0000-0000-000000000000',
         'Caio Prado C/B Stop Area',
         'Área de parada do ônibus Caio Prado — raio 80m',
         'CIRCLE',
-        '[{"lat":-23.5493,"lon":-46.6499,"altitude_m":null}]',
+        '[{"lat":-23.5482453,"lon":-46.6520375,"altitude_m":null}]',
         80.0,
         '["BUS"]',
         'MISSION_TRIGGER',
+        'b2c3d4e5-0001-0000-0000-000000000000',
+        FALSE,
         TRUE);
 
 -- Santos Port — CIRCLE 5000m, VESSEL monitoring
-INSERT INTO areas (id, name, description, area_type, coordinates, radius_meters, monitored_entity_types, action, active)
+INSERT IGNORE INTO areas (id, name, description, area_type, coordinates, radius_meters,
+                          monitored_entity_types, action, target_poi_id, patrol_zone, active)
 VALUES ('a1b2c3d4-0005-0000-0000-000000000000',
         'Santos Port',
         'Porto de Santos — principal porto do Brasil',
@@ -56,16 +91,6 @@ VALUES ('a1b2c3d4-0005-0000-0000-000000000000',
         5000.0,
         '["VESSEL"]',
         'CHECKIN_CHECKOUT',
-        TRUE);
-
--- POI: Caio Prado bus stop
-INSERT INTO points_of_interest (id, name, description, poi_type, latitude, longitude, altitude_m, metadata, active)
-VALUES ('b2c3d4e5-0001-0000-0000-000000000000',
-        'Caio Prado / Consolação',
-        'Ponto de ônibus — Caio Prado com Consolação',
-        'BUS_STOP',
-        -23.5493,
-        -46.6499,
         NULL,
-        NULL,
+        FALSE,
         TRUE);
