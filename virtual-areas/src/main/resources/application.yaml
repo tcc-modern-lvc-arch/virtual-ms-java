@@ -7,8 +7,9 @@ spring:
 
   datasource:
     url: jdbc:mariadb://${MARIADB_HOST:localhost}:3306/virtual_areas
-    username: virtual_areas
-    password: tcc-virtual-areas
+    username: ${MARIADB_USER:virtual_areas}
+    # dev default kept for the local compose; override via MARIADB_PASSWORD outside dev
+    password: ${MARIADB_PASSWORD:tcc-virtual-areas}
     driver-class-name: org.mariadb.jdbc.Driver
 
   jpa:
@@ -29,17 +30,34 @@ spring:
   grpc:
     server:
       port: 50052
+    client:
+      channel:
+        event-hub:
+          # EVENTHUB_HOST / EVENTHUB_PORT kept for docker-compose compatibility
+          target: static://${EVENTHUB_HOST:localhost}:${EVENTHUB_PORT:50051}
+          keepalive:
+            time: 60s
+            timeout: 10s
+            without-calls: false
 
 server:
   port: 8082
 
 eventhub:
   grpc:
-    host: ${EVENTHUB_HOST:localhost}
-    port: ${EVENTHUB_PORT:50051}
+    channel: event-hub
+    deadline: ${EVENTHUB_DEADLINE:2s}
+    reconnect-initial-backoff: 1s
+    reconnect-max-backoff: 30s
+
+virtual-areas:
+  dispatch:
+    # max wait for event-hub + InfluxDB side effects of one transition
+    timeout: ${DISPATCH_TIMEOUT:5s}
 
 influxdb:
   url: ${INFLUXDB_URL:http://localhost:8086}
+  # dev default kept for the local compose; override via INFLUXDB_TOKEN outside dev
   token: ${INFLUXDB_TOKEN:tcc-local-super-secret-token}
   org: ${INFLUXDB_ORG:tcc-org}
   bucket: ${INFLUXDB_BUCKET:projections}

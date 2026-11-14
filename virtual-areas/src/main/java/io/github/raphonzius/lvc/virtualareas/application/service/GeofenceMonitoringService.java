@@ -10,25 +10,32 @@ import io.github.raphonzius.lvc.virtualareas.domain.event.AreaTransitionEvent;
 import io.github.raphonzius.lvc.virtualareas.domain.event.EventDispatchPort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.InfluxProjectionPort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.LvcOrigin;
+import io.github.raphonzius.lvc.virtualareas.domain.event.MissionTarget;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.Coordinate;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.GeofenceCalculator;
 import io.github.raphonzius.lvc.virtualareas.domain.poi.PointOfInterestPort;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class GeofenceMonitoringService {
 
@@ -40,6 +47,23 @@ public class GeofenceMonitoringService {
     private final EventDispatchPort eventDispatchPort;
     private final InfluxProjectionPort influxProjectionPort;
     private final PointOfInterestPort poiPort;
+    private final ExecutorService sideEffectExecutor;
+    private final Duration sideEffectTimeout;
+
+    public GeofenceMonitoringService(AreaPort areaPort, EntityStatePort entityStatePort,
+                                     EventDispatchPort eventDispatchPort,
+                                     InfluxProjectionPort influxProjectionPort,
+                                     PointOfInterestPort poiPort,
+                                     @Qualifier("sideEffectExecutor") ExecutorService sideEffectExecutor,
+                                     @Value("${virtual-areas.dispatch.timeout:5s}") Duration sideEffectTimeout) {
+        this.areaPort = areaPort;
+        this.entityStatePort = entityStatePort;
+        this.eventDispatchPort = eventDispatchPort;
+        this.influxProjectionPort = influxProjectionPort;
+        this.poiPort = poiPort;
+        this.sideEffectExecutor = sideEffectExecutor;
+        this.sideEffectTimeout = sideEffectTimeout;
+    }
 
     @Transactional
     public List<AreaTransitionEvent> processMove(String entityId, MonitoredEntityType entityType,
@@ -78,7 +102,7 @@ public class GeofenceMonitoringService {
             boolean wasInside = currentStates.containsKey(area.id());
 
             if (inside && !wasInside) {
-                Coordinate missionTarget = resolveMissionTarget(area);
+                MissionTarget missionTarget = resolveMissionTarget(area).orElse(null);
                 var event = new AreaTransitionEvent.Checkin(
                         area.id(), area.name(), entityId, entityType, position, lvc, timestamp, missionTarget);
                 transitions.add(event);
@@ -100,32 +124,66 @@ public class GeofenceMonitoringService {
         }
     }
 
-    private Coordinate resolveMissionTarget(Area area) {
-        if (area.action() != AreaAction.MISSION_TRIGGER || area.targetPoiId() == null) return null;
+    private Optional<MissionTarget> resolveMissionTarget(Area area) {
+        if (area.action() != AreaAction.MISSION_TRIGGER || area.targetPoiId() == null) return Optional.empty();
         return poiPort.findById(area.targetPoiId())
-                .map(poi -> poi.coordinate())
-                .orElse(null);
+                .map(poi -> new MissionTarget(poi.id(), poi.name(), poi.coordinate()));
     }
 
+    /**
+     * Publishes the transition to event-hub and InfluxDB. Inside a transaction this waits for commit, so a
+     * rolled-back move never leaks an event; without one it runs immediately.
+     */
     private void dispatchAndRecord(AreaTransitionEvent event) {
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            Future<?> dispatchTask = executor.submit(() -> eventDispatchPort.dispatch(event));
-            Future<?> influxTask   = executor.submit(() -> influxProjectionPort.writeTransition(event));
-            await(dispatchTask, "event-hub", event.areaId());
-            await(influxTask,   "InfluxDB",  event.areaId());
+        // ScopedValue bindings do not cross threads (nor survive until afterCommit): capture them here
+        // and re-bind inside each task.
+        String entityId = ENTITY_ID.get();
+        MonitoredEntityType entityType = ENTITY_TYPE.get();
+        Runnable publish = () -> fanOut(event, entityId, entityType);
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    publish.run();
+                }
+            });
+        } else {
+            publish.run();
         }
     }
 
-    private void await(Future<?> future, String target, String areaId) {
+    private void fanOut(AreaTransitionEvent event, String entityId, MonitoredEntityType entityType) {
+        var dispatch = CompletableFuture.runAsync(
+                bound(entityId, entityType, "event-hub", event, () -> eventDispatchPort.dispatch(event)),
+                sideEffectExecutor);
+        var influx = CompletableFuture.runAsync(
+                bound(entityId, entityType, "InfluxDB", event, () -> influxProjectionPort.writeTransition(event)),
+                sideEffectExecutor);
+        var all = CompletableFuture.allOf(dispatch, influx);
         try {
-            future.get();
+            all.get(sideEffectTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            all.cancel(true);
+            log.error("[entity={} type={}] side effects timed out after {} ms — area={}",
+                    entityId, entityType, sideEffectTimeout.toMillis(), event.areaId());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.error("[entity={} type={}] {} interrupted — area={}",
-                    ENTITY_ID.get(), ENTITY_TYPE.get(), target, areaId);
-        } catch (ExecutionException e) {
-            log.error("[entity={} type={}] {} failed — area={}",
-                    ENTITY_ID.get(), ENTITY_TYPE.get(), target, areaId, e.getCause());
+            log.error("[entity={} type={}] side effects interrupted — area={}", entityId, entityType, event.areaId());
+        } catch (ExecutionException _) {
+            // each task already logged its own failure
         }
+    }
+
+    private Runnable bound(String entityId, MonitoredEntityType entityType, String target,
+                           AreaTransitionEvent event, Runnable task) {
+        return () -> ScopedValue.where(ENTITY_ID, entityId).where(ENTITY_TYPE, entityType).run(() -> {
+            try {
+                task.run();
+            } catch (RuntimeException e) {
+                log.error("[entity={} type={}] {} failed — area={}",
+                        ENTITY_ID.get(), ENTITY_TYPE.get(), target, event.areaId(), e);
+            }
+        });
     }
 }

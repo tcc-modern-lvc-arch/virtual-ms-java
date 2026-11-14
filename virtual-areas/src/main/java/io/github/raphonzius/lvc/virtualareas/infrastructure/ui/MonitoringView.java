@@ -18,7 +18,8 @@ import com.vaadin.flow.component.orderedlayout.VerticalLayout;
 import com.vaadin.flow.component.progressbar.ProgressBar;
 import com.vaadin.flow.router.PageTitle;
 import com.vaadin.flow.router.Route;
-import com.vaadin.flow.server.StreamResource;
+import com.vaadin.flow.server.streams.DownloadHandler;
+import com.vaadin.flow.server.streams.DownloadResponse;
 import com.vaadin.flow.server.auth.AnonymousAllowed;
 import com.vaadin.flow.theme.lumo.LumoUtility;
 import io.github.raphonzius.lvc.virtualareas.domain.entity.EntityState;
@@ -91,9 +92,10 @@ public class MonitoringView extends VerticalLayout {
         refreshBtn.addThemeVariants(ButtonVariant.LUMO_SMALL, ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_ICON);
         refreshBtn.setTooltipText("Refresh now");
 
-        StreamResource excelResource = new StreamResource("monitoring-export.xlsx", this::generateExcel);
-        Anchor exportAnchor = new Anchor(excelResource, "");
-        exportAnchor.getElement().setAttribute("download", true);
+        DownloadHandler excelDownload = DownloadHandler.fromInputStream(event ->
+                new DownloadResponse(generateExcel(), "monitoring-export.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", -1));
+        Anchor exportAnchor = new Anchor(excelDownload, "");
         Button exportBtn = new Button(VaadinIcon.TABLE.create());
         exportBtn.addThemeVariants(ButtonVariant.LUMO_SMALL, ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_ICON);
         exportBtn.setTooltipText("Export Excel");

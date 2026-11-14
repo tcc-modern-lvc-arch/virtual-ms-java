@@ -14,13 +14,13 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<Map<String, Object>> handleRuntime(RuntimeException ex) {
-        if (ex instanceof DomainException d) {
-            return error(d.statusCode(), d.message());
-        }
-        if (ex instanceof ApplicationException a) {
-            return error(a.statusCode(), a.message());
-        }
-        return error(500, "Internal server error: " + ex.getMessage());
+        // DomainException / ApplicationException are sealed interfaces; the type patterns below
+        // dispatch on the runtime class, the interface checks pick up every permitted subtype.
+        return switch (ex) {
+            case DomainException d -> error(d.statusCode(), d.message());
+            case ApplicationException a -> error(a.statusCode(), a.message());
+            default -> error(500, "Internal server error: " + ex.getMessage());
+        };
     }
 
     private ResponseEntity<Map<String, Object>> error(int status, String message) {

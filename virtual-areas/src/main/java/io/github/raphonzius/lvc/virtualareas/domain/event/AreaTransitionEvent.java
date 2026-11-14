@@ -30,7 +30,7 @@ public sealed interface AreaTransitionEvent
             Coordinate position,
             LvcOrigin lvc,
             Instant timestamp,
-            Coordinate missionTarget  // null when area has no target POI
+            MissionTarget missionTarget  // null when area has no target POI
     ) implements AreaTransitionEvent {
     }
 

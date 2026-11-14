@@ -55,8 +55,8 @@ public class InfluxDbProjectionAdapter implements InfluxProjectionPort {
     @Override
     public void writeTransition(AreaTransitionEvent event) {
         String transition = switch (event) {
-            case AreaTransitionEvent.Checkin ignored -> "checkin";
-            case AreaTransitionEvent.Checkout ignored -> "checkout";
+            case AreaTransitionEvent.Checkin _ -> "checkin";
+            case AreaTransitionEvent.Checkout _ -> "checkout";
         };
 
         Point point = Point.measurement("area_transitions")
