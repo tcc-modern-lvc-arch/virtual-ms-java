@@ -17,7 +17,7 @@ LAUNCHER="org.springframework.boot.loader.launch.JarLauncher"
 if [ ! -f "$JSA" ]; then
   echo "[entrypoint] AppCDS archive not found — running training pass..."
   # shellcheck disable=SC2086
-  java --enable-preview $JVM_BASE \
+  java $JVM_BASE \
        -XX:ArchiveClassesAtExit="$JSA" \
        -Dspring.context.exit=onRefresh \
        "$LAUNCHER" || true
@@ -28,4 +28,4 @@ CDS_FLAG=""
 [ -f "$JSA" ] && CDS_FLAG="-XX:SharedArchiveFile=$JSA"
 
 # shellcheck disable=SC2086
-exec java --enable-preview $JVM_BASE $CDS_FLAG -Xshare:auto "$LAUNCHER"
+exec java $JVM_BASE $CDS_FLAG -Xshare:auto "$LAUNCHER"

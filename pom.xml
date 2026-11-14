@@ -16,18 +16,37 @@
 
     <properties>
         <java.version>25</java.version>
-        <spring.boot.version>4.0.6</spring.boot.version>
-        <spring.grpc.version>1.0.3</spring.grpc.version>
-        <grpc.version>1.79.0</grpc.version>
-        <protobuf.version>4.34.0</protobuf.version>
-        <vaadin.version>25.1.4</vaadin.version>
-        <maven.compiler.source>25</maven.compiler.source>
-        <maven.compiler.target>25</maven.compiler.target>
+        <spring.boot.version>4.1.2</spring.boot.version>
+        <vaadin.version>25.3.5</vaadin.version>
+        <maven.compiler.release>25</maven.compiler.release>
+        <!-- No Boot parent: mirror the versions managed by spring-boot-dependencies for plugin use -->
+        <flyway.version>12.4.0</flyway.version>
+        <mariadb.version>3.5.10</mariadb.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!-- CVE-2026-102554 (guava DoS, fixed in 33.7.2); grpc-netty-shaded 1.85.1 pulls 33.6.0-android -->
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>33.7.2-android</version>
+            </dependency>
+            <dependency>
+                <groupId>io.grpc</groupId>
+                <artifactId>grpc-bom</artifactId>
+                <version>1.85.1</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-bom</artifactId>
+                <version>4.36.2</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>
@@ -52,4 +71,17 @@
             <url>https://maven.vaadin.com/vaadin-addons</url>
         </repository>
     </repositories>
+
+    <!-- No Boot parent here, so plugin versions must be pinned explicitly -->
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.15.0</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
 </project>
