@@ -58,7 +58,24 @@ RUN java -XX:+UseG1GC -XX:+UseCompactObjectHeaders --enable-native-access=ALL-UN
         -Dspring.grpc.server.port=0 \
         -Dspring.cloud.vault.enabled=false \
         -Dserver.port=0 \
-        -jar virtual-areas.jar
+        -jar virtual-areas.jar \
+    && test -s /app/app.aot
+
+# Guard: fail the build if the JVM would not accept the cache with the runtime flags
+# (AOTMode=on errors out instead of silently starting without it).
+RUN java -XX:+UseG1GC -XX:+UseCompactObjectHeaders -XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError \
+        --enable-native-access=ALL-UNNAMED \
+        -XX:AOTMode=on -XX:AOTCache=/app/app.aot \
+        -Dspring.context.exit=onRefresh \
+        -Dspring.flyway.enabled=false \
+        -Dspring.jpa.hibernate.ddl-auto=none \
+        -Dspring.jpa.properties.hibernate.boot.allow_jdbc_metadata_access=false \
+        -Dspring.datasource.url=jdbc:mariadb://training.invalid:3306/virtual_areas \
+        -Dspring.datasource.hikari.initialization-fail-timeout=-1 \
+        -Dspring.grpc.server.port=0 \
+        -Dspring.cloud.vault.enabled=false \
+        -Dserver.port=0 \
+        -jar virtual-areas.jar > /dev/null
 
 # ─── Stage 3: Runtime ─────────────────────────────────────────────────────────
 # bellsoft/liberica-runtime-container:jre-25-cds-slim-musl
