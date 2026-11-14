@@ -38,4 +38,26 @@ class ExponentialBackoffTest {
 
         assertThat(backoff.nextDelay()).isEqualTo(Duration.ofSeconds(1));
     }
+
+    @Test
+    void shortLivedStreamsKeepEscalatingEvenIfTheyDeliveredMessages() {
+        var backoff = new ExponentialBackoff(Duration.ofSeconds(1), Duration.ofSeconds(30), () -> 1.0);
+        var resetAfter = Duration.ofSeconds(30);
+
+        assertThat(backoff.nextDelayAfterStream(Duration.ofSeconds(2), resetAfter)).isEqualTo(Duration.ofSeconds(1));
+        assertThat(backoff.nextDelayAfterStream(Duration.ofSeconds(29), resetAfter)).isEqualTo(Duration.ofSeconds(2));
+        assertThat(backoff.nextDelayAfterStream(Duration.ofMillis(10), resetAfter)).isEqualTo(Duration.ofSeconds(4));
+    }
+
+    @Test
+    void streamThatLivedLongEnoughResetsTheBackoff() {
+        var backoff = new ExponentialBackoff(Duration.ofSeconds(1), Duration.ofSeconds(30), () -> 1.0);
+        var resetAfter = Duration.ofSeconds(30);
+        backoff.nextDelay();
+        backoff.nextDelay();
+        backoff.nextDelay();
+
+        assertThat(backoff.nextDelayAfterStream(Duration.ofSeconds(30), resetAfter)).isEqualTo(Duration.ofSeconds(1));
+        assertThat(backoff.nextDelayAfterStream(Duration.ofSeconds(1), resetAfter)).isEqualTo(Duration.ofSeconds(2));
+    }
 }

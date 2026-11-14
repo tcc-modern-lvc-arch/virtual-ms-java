@@ -63,7 +63,7 @@ public class AreaGrpcService extends AreaServiceGrpc.AreaServiceImplBase {
             obs.onCompleted();
         } catch (Exception e) {
             log.error("checkEntityInArea error", e);
-            obs.onError(Status.INTERNAL.withDescription("checkEntityInArea failed: " + e.getMessage())
+            obs.onError(Status.INTERNAL.withDescription("checkEntityInArea failed")
                     .withCause(e).asRuntimeException());
         }
     }
@@ -96,7 +96,7 @@ public class AreaGrpcService extends AreaServiceGrpc.AreaServiceImplBase {
             obs.onCompleted();
         } catch (Exception e) {
             log.error("getActiveAreas error", e);
-            obs.onError(Status.INTERNAL.withDescription("getActiveAreas failed: " + e.getMessage())
+            obs.onError(Status.INTERNAL.withDescription("getActiveAreas failed")
                     .withCause(e).asRuntimeException());
         }
     }

@@ -49,11 +49,23 @@ eventhub:
     deadline: ${EVENTHUB_DEADLINE:2s}
     reconnect-initial-backoff: 1s
     reconnect-max-backoff: 30s
+    # backoff resets only if the stream lived at least this long (not per message)
+    reconnect-reset-after: 30s
 
 virtual-areas:
   dispatch:
-    # max wait for event-hub + InfluxDB side effects of one transition
+    # max duration of the (async, best-effort) InfluxDB projection of one transition;
+    # CHECKIN/CHECKOUT delivery to event-hub goes through the outbox below
     timeout: ${DISPATCH_TIMEOUT:5s}
+  outbox:
+    poll-interval: ${OUTBOX_POLL_INTERVAL:500ms}
+    initial-delay: 5s            # keeps the relay quiet during startup
+    batch-size: 50
+    backoff-initial: 1s          # retry delay doubles per attempt ...
+    backoff-max: 5m              # ... up to this ceiling
+    lease: 60s                   # claimed rows stay invisible this long (crash recovery)
+    retention: ${OUTBOX_RETENTION:7d}   # sent rows older than this are deleted
+    cleanup-interval: 1h
 
 influxdb:
   url: ${INFLUXDB_URL:http://localhost:8086}

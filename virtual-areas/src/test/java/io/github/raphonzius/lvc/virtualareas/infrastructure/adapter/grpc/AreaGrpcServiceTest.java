@@ -1,6 +1,7 @@
 package io.github.raphonzius.lvc.virtualareas.infrastructure.adapter.grpc;
 
 import io.github.raphonzius.lvc.proto.virtualareas.AreaServiceGrpc;
+import io.github.raphonzius.lvc.virtualareas.LogCapture;
 import io.github.raphonzius.lvc.proto.virtualareas.CheckRequest;
 import io.github.raphonzius.lvc.proto.virtualareas.CheckResponse;
 import io.github.raphonzius.lvc.virtualareas.application.service.AreaManagementService;
@@ -77,13 +78,29 @@ class AreaGrpcServiceTest {
     }
 
     @Test
-    void unexpectedFailureIsInternalWithDescription() {
-        when(monitoring.checkPoint(any(), any())).thenThrow(new IllegalStateException("db down"));
+    void unexpectedFailureIsInternalWithGenericDescriptionAndLoggedOnServer() {
+        when(monitoring.checkPoint(any(), any())).thenThrow(new IllegalStateException("db down at 10.0.0.5"));
+        var logs = LogCapture.attach(AreaGrpcService.class);
 
         assertThatThrownBy(() -> stub.checkEntityInArea(request("DRONE")))
                 .isInstanceOfSatisfying(StatusRuntimeException.class, e -> {
                     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
-                    assertThat(e.getStatus().getDescription()).contains("db down");
+                    assertThat(e.getStatus().getDescription()).doesNotContain("db down").doesNotContain("10.0.0.5");
+                });
+        assertThat(logs.errors()).singleElement().satisfies(ev ->
+                assertThat(ev.getThrowableProxy().getMessage()).contains("db down at 10.0.0.5"));
+        logs.detach();
+    }
+
+    @Test
+    void getActiveAreasFailureDoesNotLeakTheMessageEither() {
+        when(management.getActiveAreas()).thenThrow(new IllegalStateException("jdbc:mariadb://secret-host"));
+
+        assertThatThrownBy(() -> stub.getActiveAreas(
+                io.github.raphonzius.lvc.proto.virtualareas.GetActiveAreasRequest.getDefaultInstance()))
+                .isInstanceOfSatisfying(StatusRuntimeException.class, e -> {
+                    assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+                    assertThat(e.getStatus().getDescription()).doesNotContain("secret-host");
                 });
     }
 }

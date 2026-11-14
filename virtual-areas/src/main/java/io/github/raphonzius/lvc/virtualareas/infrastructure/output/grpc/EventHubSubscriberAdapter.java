@@ -9,8 +9,11 @@ import io.github.raphonzius.lvc.virtualareas.domain.area.MonitoredEntityType;
 import io.github.raphonzius.lvc.virtualareas.domain.event.LvcOrigin;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.Coordinate;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.EventHubProperties;
+import io.github.raphonzius.lvc.virtualareas.infrastructure.support.LogThrottle;
+import io.grpc.Status;
 import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.ClientResponseObserver;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
@@ -30,8 +33,9 @@ import java.util.concurrent.ExecutionException;
  * feeds MOVE events into {@link GeofenceMonitoringService}.
  * <p>
  * Each stream is driven by its own virtual thread which, when the stream ends (error or completion),
- * re-subscribes after an exponential backoff with jitter. The backoff resets as soon as a message is
- * received. {@link #stop()} cancels the live calls and interrupts the threads.
+ * re-subscribes after an exponential backoff with jitter. The backoff resets only when the stream that
+ * just ended lived at least {@code eventhub.grpc.reconnect-reset-after} (not per message, so a hub that
+ * flaps right after sending something cannot cause a hot reconnect loop). {@link #stop()} cancels the live calls and interrupts the threads.
  */
 @Component
 @Slf4j
@@ -43,6 +47,8 @@ public class EventHubSubscriberAdapter implements SmartLifecycle {
     private final EventHubGrpc.EventHubStub asyncStub;
     private final GeofenceMonitoringService monitoringService;
     private final EventHubProperties props;
+    private final MeterRegistry meters;
+    private final LogThrottle warnThrottle = new LogThrottle(Duration.ofMinutes(1));
 
     private final List<Thread> workers = new CopyOnWriteArrayList<>();
     private final Map<MonitoredEntityType, ClientCallStreamObserver<SubscribeRequest>> liveCalls =
@@ -51,10 +57,11 @@ public class EventHubSubscriberAdapter implements SmartLifecycle {
 
     public EventHubSubscriberAdapter(EventHubGrpc.EventHubStub asyncStub,
                                      GeofenceMonitoringService monitoringService,
-                                     EventHubProperties props) {
+                                     EventHubProperties props, MeterRegistry meters) {
         this.asyncStub = asyncStub;
         this.monitoringService = monitoringService;
         this.props = props;
+        this.meters = meters;
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -100,9 +107,9 @@ public class EventHubSubscriberAdapter implements SmartLifecycle {
         var backoff = new ExponentialBackoff(props.reconnectInitialBackoff(), props.reconnectMaxBackoff());
         while (running && !Thread.currentThread().isInterrupted()) {
             try {
-                awaitStreamEnd(type, backoff);
+                Duration lifetime = awaitStreamEnd(type);
                 if (!running) break;
-                Duration delay = backoff.nextDelay();
+                Duration delay = backoff.nextDelayAfterStream(lifetime, props.reconnectResetAfter());
                 log.info("Re-subscribing to event-hub [{}] in {} ms", type, delay.toMillis());
                 Thread.sleep(delay);
             } catch (InterruptedException e) {
@@ -115,7 +122,9 @@ public class EventHubSubscriberAdapter implements SmartLifecycle {
         log.debug("Subscriber thread for [{}] exiting", type);
     }
 
-    private void awaitStreamEnd(MonitoredEntityType type, ExponentialBackoff backoff) throws InterruptedException {
+    /** Blocks until the stream ends; returns how long it lived. */
+    private Duration awaitStreamEnd(MonitoredEntityType type) throws InterruptedException {
+        long startedAt = System.nanoTime();
         var ended = new CompletableFuture<Void>();
         asyncStub.subscribe(
                 SubscribeRequest.newBuilder().setEntityType(ProtoMapper.toProto(type)).build(),
@@ -129,13 +138,16 @@ public class EventHubSubscriberAdapter implements SmartLifecycle {
 
                     @Override
                     public void onNext(EventRequest event) {
-                        backoff.reset();
                         handle(event);
                     }
 
                     @Override
                     public void onError(Throwable t) {
-                        if (running) log.warn("event-hub subscription error [{}]: {}", type, t.getMessage());
+                        if (running) {
+                            Status status = Status.fromThrowable(t);
+                            log.warn("event-hub subscription error [{}]: {} {}", type, status.getCode(),
+                                    status.getDescription());
+                        }
                         ended.complete(null);
                     }
 
@@ -150,6 +162,7 @@ public class EventHubSubscriberAdapter implements SmartLifecycle {
         } catch (ExecutionException e) {
             throw new IllegalStateException(e.getCause());
         }
+        return Duration.ofNanos(System.nanoTime() - startedAt);
     }
 
     // ── Event handling ──────────────────────────────────────────────────────────
@@ -158,23 +171,48 @@ public class EventHubSubscriberAdapter implements SmartLifecycle {
         if (event.getEventKind() != EventKind.MOVE) return;
         // VIRTUAL events are published by EventSimulationService and already processed
         // directly there — skip to avoid double-writing to DB and InfluxDB
-        if (event.getLvc() == io.github.raphonzius.lvc.proto.event.LvcOrigin.VIRTUAL) return;
+        if (event.getLvc() == io.github.raphonzius.lvc.proto.event.LvcOrigin.VIRTUAL) {
+            drop("virtual");
+            return;
+        }
 
         Optional<MonitoredEntityType> type = ProtoMapper.fromProto(event.getEntityType());
+        if (type.isEmpty()) {
+            drop("unknown_type");
+            if (warnThrottle.allow("unknown_type")) {
+                log.warn("Ignoring MOVE entity={} with unrecognized entity_type={} (newer proto?); "
+                        + "further occurrences counted, warned at most once a minute",
+                        event.getEntityId(), event.getEntityTypeValue());
+            }
+            return;
+        }
         Optional<LvcOrigin> lvc = ProtoMapper.fromProto(event.getLvc());
-        if (type.isEmpty() || lvc.isEmpty()) {
-            log.warn("Ignoring MOVE entity={} with unrecognized entity_type={} / lvc={} (newer proto?)",
-                    event.getEntityId(), event.getEntityTypeValue(), event.getLvcValue());
+        if (lvc.isEmpty()) {
+            drop("unknown_lvc");
+            if (warnThrottle.allow("unknown_lvc")) {
+                log.warn("Ignoring MOVE entity={} with unrecognized lvc={} (newer proto?); "
+                        + "further occurrences counted, warned at most once a minute",
+                        event.getEntityId(), event.getLvcValue());
+            }
             return;
         }
         Optional<Coordinate> position = ProtoMapper.locationOf(event);
-        if (position.isEmpty()) return;
+        if (position.isEmpty()) {
+            drop("no_location");
+            log.debug("Ignoring MOVE entity={} without location payload", event.getEntityId());
+            return;
+        }
 
         try {
             monitoringService.processMove(event.getEntityId(), type.get(), position.get(), lvc.get(),
                     Instant.ofEpochMilli(event.getTimestampMs()));
         } catch (RuntimeException e) {
+            drop("error");
             log.error("Error processing MOVE event entity={}", event.getEntityId(), e);
         }
+    }
+
+    private void drop(String reason) {
+        meters.counter("virtualareas.subscriber.dropped", "reason", reason).increment();
     }
 }

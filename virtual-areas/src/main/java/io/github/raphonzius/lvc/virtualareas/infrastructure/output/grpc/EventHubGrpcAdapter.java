@@ -24,9 +24,9 @@ import java.util.concurrent.TimeUnit;
 
 @Component
 @Slf4j
-public class EventHubGrpcAdapter implements EventDispatchPort, SimulationEventPort {
+public class EventHubGrpcAdapter implements EventDispatchPort, SimulationEventPort, EventRequestSender {
 
-    static final String SOURCE = "virtual-ms-java";
+    public static final String SOURCE = "virtual-ms-java";
     static final String SIMULATION_SOURCE = "virtual-ms-java-simulation";
 
     private final EventHubGrpc.EventHubBlockingStub stub;
@@ -73,6 +73,12 @@ public class EventHubGrpcAdapter implements EventDispatchPort, SimulationEventPo
                 .setFloodArea(flood)
                 .build();
 
+        sendAndCheck(request);
+    }
+
+    /** Used by the outbox relay: payloads are stored already serialized. */
+    @Override
+    public void send(EventRequest request) {
         sendAndCheck(request);
     }
 

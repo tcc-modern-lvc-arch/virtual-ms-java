@@ -19,6 +19,8 @@ import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
+import io.github.raphonzius.lvc.virtualareas.LogCapture;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -46,6 +48,7 @@ class EventHubSubscriberAdapterTest {
     private ManagedChannel channel;
     private EventHubSubscriberAdapter adapter;
     private final GeofenceMonitoringService monitoring = mock(GeofenceMonitoringService.class);
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final List<ServerCallStreamObserver<EventRequest>> openStreams = new CopyOnWriteArrayList<>();
 
     /** Starts an in-process event-hub whose Subscribe behaviour for DRONE is given by {@code droneHandler}. */
@@ -64,7 +67,8 @@ class EventHubSubscriberAdapterTest {
                 }).build().start();
         channel = InProcessChannelBuilder.forName(name).build();
         adapter = new EventHubSubscriberAdapter(EventHubGrpc.newStub(channel), monitoring,
-                new EventHubProperties(null, null, FAST, Duration.ofMillis(100)));
+                new EventHubProperties(null, null, FAST, Duration.ofMillis(100), Duration.ofSeconds(30)),
+                meters);
         adapter.start();
     }
 
@@ -148,5 +152,68 @@ class EventHubSubscriberAdapterTest {
         }
         assertThat(openStreams).allMatch(ServerCallStreamObserver::isCancelled);
         assertThat(adapter.awaitTermination(Duration.ofSeconds(2))).isTrue();
+    }
+
+    // ── dropped events: counters + log levels ───────────────────────────────────
+
+    private double dropped(String reason) {
+        var c = meters.find("virtualareas.subscriber.dropped").tag("reason", reason).counter();
+        return c == null ? 0 : c.count();
+    }
+
+    private EventHubSubscriberAdapter handlerOnly() {
+        return new EventHubSubscriberAdapter(null, monitoring, new EventHubProperties(null, null, null, null, null),
+                meters);
+    }
+
+    @Test
+    void droppedEventsAreCountedPerReason() {
+        var handler = handlerOnly();
+        var live = io.github.raphonzius.lvc.proto.event.LvcOrigin.LIVE;
+
+        handler.handle(drone(EventKind.MOVE, io.github.raphonzius.lvc.proto.event.LvcOrigin.VIRTUAL));
+        handler.handle(drone(EventKind.MOVE, live).toBuilder().setEntityTypeValue(99).build());
+        handler.handle(drone(EventKind.MOVE, live).toBuilder().setLvcValue(99).build());
+        handler.handle(drone(EventKind.MOVE, live).toBuilder().clearDrone().build());
+        org.mockito.Mockito.doThrow(new IllegalStateException("db")).when(monitoring)
+                .processMove(any(), any(), any(), any(), any());
+        handler.handle(drone(EventKind.MOVE, live));
+        handler.handle(drone(EventKind.CHECKIN, live)); // not a MOVE: ignored, not a "drop"
+
+        assertThat(dropped("virtual")).isEqualTo(1);
+        assertThat(dropped("unknown_type")).isEqualTo(1);
+        assertThat(dropped("unknown_lvc")).isEqualTo(1);
+        assertThat(dropped("no_location")).isEqualTo(1);
+        assertThat(dropped("error")).isEqualTo(1);
+    }
+
+    @Test
+    void unknownTypeWarnIsRateLimitedAndMissingLocationIsOnlyDebug() {
+        var handler = handlerOnly();
+        var logs = LogCapture.attach(EventHubSubscriberAdapter.class);
+        var live = io.github.raphonzius.lvc.proto.event.LvcOrigin.LIVE;
+
+        for (int i = 0; i < 5; i++) {
+            handler.handle(drone(EventKind.MOVE, live).toBuilder().setEntityTypeValue(99).build());
+            handler.handle(drone(EventKind.MOVE, live).toBuilder().clearDrone().build());
+        }
+
+        assertThat(dropped("unknown_type")).as("every drop is counted").isEqualTo(5);
+        assertThat(logs.warnings()).as("but at most one WARN per minute").hasSize(1);
+        assertThat(logs.at(ch.qos.logback.classic.Level.DEBUG)).hasSize(5); // no_location
+        logs.detach();
+    }
+
+    @Test
+    void streamErrorIsLoggedWithGrpcStatusCodeAndDescription() throws Exception {
+        var logs = LogCapture.attach(EventHubSubscriberAdapter.class);
+        startHub((call, obs) -> obs.onError(
+                Status.UNAVAILABLE.withDescription("hub restarting").asRuntimeException()));
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (logs.warnings().isEmpty() && System.nanoTime() < deadline) Thread.sleep(10);
+
+        assertThat(logs.warnings().getFirst().getFormattedMessage()).contains("UNAVAILABLE").contains("hub restarting");
+        logs.detach();
     }
 }

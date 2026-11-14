@@ -132,6 +132,17 @@
             <artifactId>spring-boot-starter-grpc-server-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Real MariaDB for the outbox relay (FOR UPDATE SKIP LOCKED); versions from the Boot BOM -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mariadb</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

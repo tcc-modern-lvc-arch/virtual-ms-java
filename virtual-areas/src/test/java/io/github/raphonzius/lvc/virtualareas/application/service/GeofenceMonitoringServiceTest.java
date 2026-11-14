@@ -7,15 +7,16 @@ import io.github.raphonzius.lvc.virtualareas.domain.area.MonitoredEntityType;
 import io.github.raphonzius.lvc.virtualareas.domain.entity.EntityState;
 import io.github.raphonzius.lvc.virtualareas.domain.entity.EntityStatePort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.AreaTransitionEvent;
-import io.github.raphonzius.lvc.virtualareas.domain.event.EventDispatchPort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.InfluxProjectionPort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.LvcOrigin;
 import io.github.raphonzius.lvc.virtualareas.domain.event.MissionTarget;
+import io.github.raphonzius.lvc.virtualareas.domain.event.TransitionOutbox;
 import io.github.raphonzius.lvc.virtualareas.domain.event.TransitionRecord;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.Coordinate;
 import io.github.raphonzius.lvc.virtualareas.domain.poi.PoiType;
 import io.github.raphonzius.lvc.virtualareas.domain.poi.PointOfInterest;
 import io.github.raphonzius.lvc.virtualareas.domain.poi.PointOfInterestPort;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,8 +32,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -41,37 +45,44 @@ class GeofenceMonitoringServiceTest {
 
     private static final Instant NOW = Instant.parse("2026-11-14T12:00:00Z");
     private static final Coordinate CENTER = new Coordinate(-23.5466, -46.6520);
+    private static final Coordinate FAR = new Coordinate(-23.0, -46.0);
     private static final Area.CircleArea STOP_AREA = new Area.CircleArea("area-1", "Stop", "", CENTER, 80,
             List.of(MonitoredEntityType.BUS), AreaAction.MISSION_TRIGGER, true, "poi-9", false);
 
-    /** Records each side effect together with the ScopedValue bindings visible on the executing thread. */
-    record Call(String sink, AreaTransitionEvent event, String scopedEntityId, MonitoredEntityType scopedType,
+    /** Records the Influx write together with the ScopedValue bindings visible on the executing thread. */
+    record Call(AreaTransitionEvent event, String scopedEntityId, MonitoredEntityType scopedType,
                 boolean virtualThread) {
     }
 
-    private final List<Call> calls = new CopyOnWriteArrayList<>();
+    private final List<Call> influxCalls = new CopyOnWriteArrayList<>();
+    private final List<AreaTransitionEvent> outboxRows = new CopyOnWriteArrayList<>();
+    private final List<Boolean> syncActiveOnEnqueue = new CopyOnWriteArrayList<>();
     private final AreaPort areaPort = mock(AreaPort.class);
     private final EntityStatePort statePort = mock(EntityStatePort.class);
     private final PointOfInterestPort poiPort = mock(PointOfInterestPort.class);
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private ExecutorService executor;
-    private EventDispatchPort dispatchPort = e -> record("event-hub", e);
-    private InfluxProjectionPort influxPort = new InfluxProjectionPort() {
-        @Override
-        public void writeTransition(AreaTransitionEvent event) {
-            record("influx", event);
-        }
-
-        @Override
-        public List<TransitionRecord> queryRecent(int limit) {
-            return List.of();
-        }
+    private TransitionOutbox outbox = event -> {
+        syncActiveOnEnqueue.add(TransactionSynchronizationManager.isSynchronizationActive());
+        outboxRows.add(event);
     };
+    private InfluxProjectionPort influxPort = influx(e -> influxCalls.add(new Call(e,
+            GeofenceMonitoringService.ENTITY_ID.isBound() ? GeofenceMonitoringService.ENTITY_ID.get() : null,
+            GeofenceMonitoringService.ENTITY_TYPE.isBound() ? GeofenceMonitoringService.ENTITY_TYPE.get() : null,
+            Thread.currentThread().isVirtual())));
 
-    private void record(String sink, AreaTransitionEvent e) {
-        calls.add(new Call(sink, e,
-                GeofenceMonitoringService.ENTITY_ID.isBound() ? GeofenceMonitoringService.ENTITY_ID.get() : null,
-                GeofenceMonitoringService.ENTITY_TYPE.isBound() ? GeofenceMonitoringService.ENTITY_TYPE.get() : null,
-                Thread.currentThread().isVirtual()));
+    private static InfluxProjectionPort influx(java.util.function.Consumer<AreaTransitionEvent> onWrite) {
+        return new InfluxProjectionPort() {
+            @Override
+            public void writeTransition(AreaTransitionEvent event) {
+                onWrite.accept(event);
+            }
+
+            @Override
+            public List<TransitionRecord> queryRecent(int limit) {
+                return List.of();
+            }
+        };
     }
 
     @BeforeEach
@@ -92,8 +103,18 @@ class GeofenceMonitoringServiceTest {
     }
 
     private GeofenceMonitoringService service(Duration timeout) {
-        return new GeofenceMonitoringService(areaPort, statePort, dispatchPort, influxPort, poiPort,
-                executor, timeout);
+        return new GeofenceMonitoringService(areaPort, statePort, outbox, influxPort, poiPort,
+                executor, timeout, meters);
+    }
+
+    private double influxFailures() {
+        var c = meters.find("virtualareas.influx.failures").counter();
+        return c == null ? 0 : c.count();
+    }
+
+    private static void await(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
     }
 
     @Test
@@ -107,11 +128,46 @@ class GeofenceMonitoringServiceTest {
     }
 
     @Test
-    void sideEffectsRunOnVirtualThreadsWithScopedValuesRebound() {
+    void checkinAndCheckoutAreWrittenToTheOutbox() {
+        var svc = service(Duration.ofSeconds(2));
+        var in = svc.processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
+        when(statePort.findCurrentAreasFor("bus-1", MonitoredEntityType.BUS)).thenReturn(List.of(
+                new EntityState("bus-1", MonitoredEntityType.BUS, "area-1", NOW, NOW)));
+        var out = svc.processMove("bus-1", MonitoredEntityType.BUS, FAR, LvcOrigin.LIVE, NOW.plusSeconds(5));
+
+        assertThat(outboxRows).containsExactly(in.getFirst(), out.getFirst());
+        assertThat(outboxRows.get(0)).isInstanceOf(AreaTransitionEvent.Checkin.class);
+        assertThat(outboxRows.get(1)).isInstanceOf(AreaTransitionEvent.Checkout.class);
+    }
+
+    @Test
+    void outboxRowIsWrittenInsideTheTransactionNotAfterCommit() {
+        TransactionSynchronizationManager.initSynchronization();
+
         service(Duration.ofSeconds(2)).processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
 
-        assertThat(calls).extracting(Call::sink).containsExactlyInAnyOrder("event-hub", "influx");
-        assertThat(calls).allSatisfy(c -> {
+        assertThat(outboxRows).as("enqueued while the transaction is still open").hasSize(1);
+        assertThat(syncActiveOnEnqueue).containsExactly(true);
+        assertThat(influxCalls).as("influx waits for commit").isEmpty();
+    }
+
+    @Test
+    void failureToWriteTheOutboxPropagatesSoTheStateChangeRollsBack() {
+        outbox = event -> {
+            throw new IllegalStateException("db down");
+        };
+
+        assertThatThrownBy(() -> service(Duration.ofSeconds(2))
+                .processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void influxRunsAsyncOnVirtualThreadWithScopedValuesRebound() throws Exception {
+        service(Duration.ofSeconds(2)).processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
+
+        await(() -> !influxCalls.isEmpty());
+        assertThat(influxCalls).singleElement().satisfies(c -> {
             assertThat(c.virtualThread()).isTrue();
             assertThat(c.scopedEntityId()).isEqualTo("bus-1");
             assertThat(c.scopedType()).isEqualTo(MonitoredEntityType.BUS);
@@ -119,62 +175,97 @@ class GeofenceMonitoringServiceTest {
     }
 
     @Test
-    void sideEffectsAreDeferredUntilCommit() {
+    void influxIsDeferredUntilCommit() throws Exception {
         TransactionSynchronizationManager.initSynchronization();
 
         service(Duration.ofSeconds(2)).processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
-        assertThat(calls).as("nothing published before commit").isEmpty();
+        assertThat(influxCalls).as("nothing projected before commit").isEmpty();
 
         TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
 
-        assertThat(calls).extracting(Call::sink).containsExactlyInAnyOrder("event-hub", "influx");
-        assertThat(calls).allSatisfy(c -> assertThat(c.scopedEntityId()).isEqualTo("bus-1"));
+        await(() -> !influxCalls.isEmpty());
+        assertThat(influxCalls).singleElement().satisfies(c -> assertThat(c.scopedEntityId()).isEqualTo("bus-1"));
     }
 
     @Test
-    void rolledBackTransactionPublishesNothing() {
+    void rolledBackTransactionProjectsNothing() throws Exception {
         TransactionSynchronizationManager.initSynchronization();
 
         service(Duration.ofSeconds(2)).processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
         TransactionSynchronizationManager.getSynchronizations()
                 .forEach(s -> s.afterCompletion(TransactionSynchronization.STATUS_ROLLED_BACK));
 
-        assertThat(calls).isEmpty();
+        Thread.sleep(100);
+        assertThat(influxCalls).isEmpty();
     }
 
     @Test
-    void failingOrHangingSinkDoesNotBreakTheCallerAndIsBoundedByTimeout() {
+    void failingInfluxDoesNotAffectCallerOrOutboxAndIsCounted() throws Exception {
+        influxPort = influx(e -> {
+            throw new IllegalStateException("influx down");
+        });
+
+        var events = service(Duration.ofSeconds(2))
+                .processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
+
+        assertThat(events).hasSize(1);
+        assertThat(outboxRows).hasSize(1);
+        await(() -> influxFailures() >= 1);
+        assertThat(influxFailures()).isEqualTo(1);
+    }
+
+    @Test
+    void influxErrorsAreCapturedToo() throws Exception {
+        influxPort = influx(e -> {
+            throw new NoSuchMethodError("influx client skew");
+        });
+
+        service(Duration.ofSeconds(2)).processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
+
+        await(() -> influxFailures() >= 1);
+        assertThat(influxFailures()).isEqualTo(1);
+    }
+
+    @Test
+    void hangingInfluxNeverBlocksTheCallerAndTimesOut() throws Exception {
         var release = new CountDownLatch(1);
-        dispatchPort = e -> {
+        influxPort = influx(e -> {
             try {
                 release.await(10, TimeUnit.SECONDS);
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
             }
-        };
-        influxPort = new InfluxProjectionPort() {
-            @Override
-            public void writeTransition(AreaTransitionEvent event) {
-                throw new IllegalStateException("influx down");
-            }
-
-            @Override
-            public List<TransitionRecord> queryRecent(int limit) {
-                return List.of();
-            }
-        };
+        });
 
         long start = System.nanoTime();
-        var events = service(Duration.ofMillis(200))
+        var events = service(Duration.ofMillis(150))
                 .processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
-        release.countDown();
+        long elapsedMs = Duration.ofNanos(System.nanoTime() - start).toMillis();
 
         assertThat(events).hasSize(1);
-        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
+        assertThat(elapsedMs).as("caller returned without waiting for influx").isLessThan(100);
+        await(() -> influxFailures() >= 1);
+        release.countDown();
+        assertThat(influxFailures()).as("timeout counted as failure").isEqualTo(1);
     }
 
     @Test
-    void stayingInsideOnlyRefreshesState() {
+    void afterCommitNeverPropagatesExceptions() {
+        TransactionSynchronizationManager.initSynchronization();
+        service(Duration.ofSeconds(2)).processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
+        executor.close(); // runAsync now throws RejectedExecutionException
+
+        var ran = new AtomicBoolean();
+        assertThatCode(() -> TransactionSynchronizationManager.getSynchronizations().forEach(s -> {
+            s.afterCommit();
+            ran.set(true);
+        })).doesNotThrowAnyException();
+        assertThat(ran).isTrue();
+        assertThat(influxFailures()).isEqualTo(1);
+    }
+
+    @Test
+    void stayingInsideOnlyRefreshesState() throws Exception {
         when(statePort.findCurrentAreasFor("bus-1", MonitoredEntityType.BUS)).thenReturn(List.of(
                 new EntityState("bus-1", MonitoredEntityType.BUS, "area-1", NOW.minusSeconds(60), NOW.minusSeconds(5))));
 
@@ -182,6 +273,8 @@ class GeofenceMonitoringServiceTest {
                 .processMove("bus-1", MonitoredEntityType.BUS, CENTER, LvcOrigin.LIVE, NOW);
 
         assertThat(events).isEmpty();
-        assertThat(calls).isEmpty();
+        Thread.sleep(50);
+        assertThat(outboxRows).isEmpty();
+        assertThat(influxCalls).isEmpty();
     }
 }

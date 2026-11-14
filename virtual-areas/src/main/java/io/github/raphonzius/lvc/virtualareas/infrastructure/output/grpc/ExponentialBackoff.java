@@ -34,6 +34,16 @@ final class ExponentialBackoff {
         return Duration.ofMillis(half + Math.round((base - half) * random.getAsDouble()));
     }
 
+    /**
+     * Delay before the next attempt once a stream has ended after living for {@code lifetime}: the backoff is
+     * reset only when the stream was stable (lived at least {@code resetAfter}); a hub that accepts the call,
+     * sends something and drops it again must not turn the reconnect loop into a hot loop.
+     */
+    synchronized Duration nextDelayAfterStream(Duration lifetime, Duration resetAfter) {
+        if (lifetime.compareTo(resetAfter) >= 0) reset();
+        return nextDelay();
+    }
+
     synchronized void reset() {
         attempt = 0;
     }

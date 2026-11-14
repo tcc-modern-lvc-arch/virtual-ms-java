@@ -48,7 +48,7 @@ class EventHubGrpcAdapterTest {
                     }
                 }).build().start();
         channel = InProcessChannelBuilder.forName(name).build();
-        var props = new EventHubProperties(null, deadline, null, null);
+        var props = new EventHubProperties(null, deadline, null, null, null);
         return new EventHubGrpcAdapter(EventHubGrpc.newBlockingStub(channel), props);
     }
 
