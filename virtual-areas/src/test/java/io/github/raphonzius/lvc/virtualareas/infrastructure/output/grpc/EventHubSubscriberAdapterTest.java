@@ -67,7 +67,7 @@ class EventHubSubscriberAdapterTest {
                 }).build().start();
         channel = InProcessChannelBuilder.forName(name).build();
         adapter = new EventHubSubscriberAdapter(EventHubGrpc.newStub(channel), monitoring,
-                new EventHubProperties(null, null, FAST, Duration.ofMillis(100), Duration.ofSeconds(30)),
+                new EventHubProperties(null, FAST, Duration.ofMillis(100), Duration.ofSeconds(30)),
                 meters);
         adapter.start();
     }
@@ -162,7 +162,7 @@ class EventHubSubscriberAdapterTest {
     }
 
     private EventHubSubscriberAdapter handlerOnly() {
-        return new EventHubSubscriberAdapter(null, monitoring, new EventHubProperties(null, null, null, null, null),
+        return new EventHubSubscriberAdapter(null, monitoring, new EventHubProperties(null, null, null, null),
                 meters);
     }
 

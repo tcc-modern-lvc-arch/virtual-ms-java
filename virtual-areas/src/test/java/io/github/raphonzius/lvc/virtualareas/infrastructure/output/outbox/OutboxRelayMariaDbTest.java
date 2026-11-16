@@ -13,6 +13,7 @@ import io.github.raphonzius.lvc.virtualareas.domain.event.LvcOrigin;
 import io.github.raphonzius.lvc.virtualareas.domain.event.TransitionRecord;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.Coordinate;
 import io.github.raphonzius.lvc.virtualareas.domain.poi.PointOfInterestPort;
+import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.DispatchProperties;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.OutboxProperties;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.persistence.mariadb.EntityStateMariadbAdapter;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.persistence.mariadb.EventOutboxMariadbAdapter;
@@ -129,7 +130,7 @@ class OutboxRelayMariaDbTest {
             }
         };
         service = new GeofenceMonitoringService(areaPort, new EntityStateMariadbAdapter(jdbc), store, influx,
-                mock(PointOfInterestPort.class), executor, Duration.ofSeconds(2), meters);
+                mock(PointOfInterestPort.class), executor, new DispatchProperties(Duration.ofSeconds(2)), meters);
         relay = newRelay(new OutboxProperties(10, Duration.ofSeconds(1), Duration.ofSeconds(8),
                 Duration.ofSeconds(60), Duration.ofDays(7)));
     }

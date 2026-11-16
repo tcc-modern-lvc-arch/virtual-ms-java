@@ -10,15 +10,15 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionalEventListener;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -47,7 +47,7 @@ public class OutboxRelay {
     private final EventOutboxMariadbAdapter store;
     private final EventRequestSender sender;
     private final OutboxProperties props;
-    private final ExecutorService executor;
+    private final Executor executor;
     private final Clock clock;
     private final Counter sentCounter;
     private final Counter failureCounter;
@@ -57,12 +57,12 @@ public class OutboxRelay {
     private final AtomicBoolean nudgeQueued = new AtomicBoolean();
 
     public OutboxRelay(EventOutboxMariadbAdapter store, EventRequestSender sender, OutboxProperties props,
-                       MeterRegistry meters, @Qualifier("sideEffectExecutor") ExecutorService executor,
+                       MeterRegistry meters, @Qualifier("applicationTaskExecutor") Executor applicationTaskExecutor,
                        Clock clock) {
         this.store = store;
         this.sender = sender;
         this.props = props;
-        this.executor = executor;
+        this.executor = applicationTaskExecutor;
         this.clock = clock;
         this.sentCounter = Counter.builder("virtualareas.outbox.sent")
                 .description("Outbox events delivered to event-hub").register(meters);

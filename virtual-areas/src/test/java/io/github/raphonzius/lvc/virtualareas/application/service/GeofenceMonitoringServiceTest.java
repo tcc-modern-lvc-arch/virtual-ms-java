@@ -1,5 +1,6 @@
 package io.github.raphonzius.lvc.virtualareas.application.service;
 
+import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.DispatchProperties;
 import io.github.raphonzius.lvc.virtualareas.domain.area.Area;
 import io.github.raphonzius.lvc.virtualareas.domain.area.AreaAction;
 import io.github.raphonzius.lvc.virtualareas.domain.area.AreaPort;
@@ -104,7 +105,7 @@ class GeofenceMonitoringServiceTest {
 
     private GeofenceMonitoringService service(Duration timeout) {
         return new GeofenceMonitoringService(areaPort, statePort, outbox, influxPort, poiPort,
-                executor, timeout, meters);
+                executor, new DispatchProperties(timeout), meters);
     }
 
     private double influxFailures() {

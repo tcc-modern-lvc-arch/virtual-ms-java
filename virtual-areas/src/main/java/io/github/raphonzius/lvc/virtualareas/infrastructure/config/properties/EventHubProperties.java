@@ -6,23 +6,20 @@ import java.time.Duration;
 
 /**
  * event-hub client settings. The network address itself lives in
- * {@code spring.grpc.client.channel.<channel>.target} (Spring gRPC channel factory).
+ * {@code spring.grpc.client.channel.event-hub.target} (Spring gRPC channel factory).
  *
- * @param channel                 name of the Spring gRPC channel to use
  * @param deadline                per-call deadline for unary SendEvent calls
  * @param reconnectInitialBackoff first delay before re-subscribing after a stream failure
  * @param reconnectMaxBackoff     upper bound of the exponential re-subscribe backoff
  * @param reconnectResetAfter     the backoff resets only if a stream lived at least this long
  */
 @ConfigurationProperties(prefix = "eventhub.grpc")
-public record EventHubProperties(String channel,
-                                 Duration deadline,
+public record EventHubProperties(Duration deadline,
                                  Duration reconnectInitialBackoff,
                                  Duration reconnectMaxBackoff,
                                  Duration reconnectResetAfter) {
 
     public EventHubProperties {
-        if (channel == null || channel.isBlank()) channel = "event-hub";
         if (reconnectResetAfter == null) reconnectResetAfter = Duration.ofSeconds(30);
         if (deadline == null) deadline = Duration.ofSeconds(2);
         if (reconnectInitialBackoff == null) reconnectInitialBackoff = Duration.ofSeconds(1);

@@ -14,11 +14,11 @@ import io.github.raphonzius.lvc.virtualareas.domain.event.TransitionOutbox;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.Coordinate;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.GeofenceCalculator;
 import io.github.raphonzius.lvc.virtualareas.domain.poi.PointOfInterestPort;
+import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.DispatchProperties;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -32,7 +32,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -48,7 +48,7 @@ public class GeofenceMonitoringService {
     private final TransitionOutbox outbox;
     private final InfluxProjectionPort influxProjectionPort;
     private final PointOfInterestPort poiPort;
-    private final ExecutorService sideEffectExecutor;
+    private final Executor sideEffectExecutor;
     private final Duration sideEffectTimeout;
     private final Counter influxFailures;
 
@@ -56,16 +56,16 @@ public class GeofenceMonitoringService {
                                      TransitionOutbox outbox,
                                      InfluxProjectionPort influxProjectionPort,
                                      PointOfInterestPort poiPort,
-                                     @Qualifier("sideEffectExecutor") ExecutorService sideEffectExecutor,
-                                     @Value("${virtual-areas.dispatch.timeout:5s}") Duration sideEffectTimeout,
+                                     @Qualifier("applicationTaskExecutor") Executor applicationTaskExecutor,
+                                     DispatchProperties dispatch,
                                      MeterRegistry meters) {
         this.areaPort = areaPort;
         this.entityStatePort = entityStatePort;
         this.outbox = outbox;
         this.influxProjectionPort = influxProjectionPort;
         this.poiPort = poiPort;
-        this.sideEffectExecutor = sideEffectExecutor;
-        this.sideEffectTimeout = sideEffectTimeout;
+        this.sideEffectExecutor = applicationTaskExecutor;
+        this.sideEffectTimeout = dispatch.timeout();
         this.influxFailures = Counter.builder("virtualareas.influx.failures")
                 .description("InfluxDB transition projections that failed or timed out").register(meters);
     }
