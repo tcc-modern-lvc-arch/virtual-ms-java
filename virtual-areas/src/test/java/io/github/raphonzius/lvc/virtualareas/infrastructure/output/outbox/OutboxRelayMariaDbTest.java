@@ -17,7 +17,6 @@ import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.Di
 import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.OutboxProperties;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.persistence.mariadb.EntityStateMariadbAdapter;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.persistence.mariadb.EventOutboxMariadbAdapter;
-import io.github.raphonzius.lvc.virtualareas.infrastructure.output.persistence.mariadb.OutboxEnqueued;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -84,7 +83,6 @@ class OutboxRelayMariaDbTest {
     }
 
     private final MutableClock clock = new MutableClock();
-    private final List<Object> published = new CopyOnWriteArrayList<>();
     private final List<EventRequest> sent = new CopyOnWriteArrayList<>();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final AreaPort areaPort = mock(AreaPort.class);
@@ -116,7 +114,7 @@ class OutboxRelayMariaDbTest {
         jdbc.update("DELETE FROM entity_states");
         var txManager = new DataSourceTransactionManager(dataSource);
         tx = new TransactionTemplate(txManager);
-        store = new EventOutboxMariadbAdapter(jdbc, txManager, published::add, clock);
+        store = new EventOutboxMariadbAdapter(jdbc, txManager, clock);
         executor = Executors.newVirtualThreadPerTaskExecutor();
         when(areaPort.findActive()).thenReturn(List.of(AREA));
         InfluxProjectionPort influx = new InfluxProjectionPort() {
@@ -139,7 +137,7 @@ class OutboxRelayMariaDbTest {
         return new OutboxRelay(store, request -> {
             if (failing.test(request)) throw failure;
             sent.add(request);
-        }, props, meters, executor, clock);
+        }, props, meters, clock);
     }
 
     @AfterEach
@@ -185,7 +183,6 @@ class OutboxRelayMariaDbTest {
         assertThat(request.getEventKind()).isEqualTo(EventKind.CHECKIN);
         assertThat(request.getEntityId()).isEqualTo("bus-1");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM entity_states", Long.class)).isEqualTo(1);
-        assertThat(published).singleElement().isInstanceOf(OutboxEnqueued.class);
     }
 
     @Test
@@ -322,22 +319,11 @@ class OutboxRelayMariaDbTest {
         move("bus-1", CENTER);
         relay = new OutboxRelay(store, _ -> {
             throw new NoSuchMethodError("grpc skew");
-        }, new OutboxProperties(null, null, null, null, null), meters, executor, clock);
+        }, new OutboxProperties(null, null, null, null, null), meters, clock);
 
         assertThatThrownBy(relay::drain).isInstanceOf(NoSuchMethodError.class);
 
         assertThat(count("attempts = 1 AND last_error LIKE '%grpc skew%'")).isEqualTo(1);
-    }
-
-    @Test
-    void nudgeAfterCommitDrainsWithoutWaitingForThePoll() throws Exception {
-        move("bus-1", CENTER);
-
-        relay.onEnqueued(new OutboxEnqueued());
-
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-        while (sent.isEmpty() && System.nanoTime() < deadline) Thread.sleep(10);
-        assertThat(sent).hasSize(1);
     }
 
     @Test

@@ -5,28 +5,22 @@ import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.Ou
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.grpc.EventRequestSender;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.persistence.mariadb.EventOutboxMariadbAdapter;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.persistence.mariadb.EventOutboxMariadbAdapter.OutboxRow;
-import io.github.raphonzius.lvc.virtualareas.infrastructure.output.persistence.mariadb.OutboxEnqueued;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.event.TransactionalEventListener;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Delivers the transactional outbox to event-hub (at-least-once).
  * <ul>
- *   <li><b>Triggers:</b> a fixed-delay poll ({@code virtual-areas.outbox.poll-interval}, default 500ms) plus a
- *       non-blocking nudge right after the enqueuing transaction commits.</li>
+ *   <li><b>Triggers:</b> a fixed-delay poll ({@code virtual-areas.outbox.poll-interval}, default 500ms), so delivery
+ *       latency is up to one poll interval.</li>
  *   <li><b>Claim:</b> {@code SELECT ... FOR UPDATE SKIP LOCKED} in a short transaction; claimed rows are leased
  *       and sent <em>outside</em> any transaction, so no JDBC connection is held during gRPC calls.</li>
  *   <li><b>Ordering:</b> per entity (entity id + type). Only the oldest unsent event of each entity is
@@ -47,22 +41,15 @@ public class OutboxRelay {
     private final EventOutboxMariadbAdapter store;
     private final EventRequestSender sender;
     private final OutboxProperties props;
-    private final Executor executor;
     private final Clock clock;
     private final Counter sentCounter;
     private final Counter failureCounter;
 
-    private final ReentrantLock draining = new ReentrantLock();
-    private final AtomicBoolean rerun = new AtomicBoolean();
-    private final AtomicBoolean nudgeQueued = new AtomicBoolean();
-
     public OutboxRelay(EventOutboxMariadbAdapter store, EventRequestSender sender, OutboxProperties props,
-                       MeterRegistry meters, @Qualifier("applicationTaskExecutor") Executor applicationTaskExecutor,
-                       Clock clock) {
+                       MeterRegistry meters, Clock clock) {
         this.store = store;
         this.sender = sender;
         this.props = props;
-        this.executor = applicationTaskExecutor;
         this.clock = clock;
         this.sentCounter = Counter.builder("virtualareas.outbox.sent")
                 .description("Outbox events delivered to event-hub").register(meters);
@@ -93,24 +80,6 @@ public class OutboxRelay {
         }
     }
 
-    /** Wake-up after the transaction that enqueued an event commits. Never blocks and never throws. */
-    @TransactionalEventListener(fallbackExecution = true)
-    public void onEnqueued(OutboxEnqueued ignored) {
-        if (!nudgeQueued.compareAndSet(false, true)) return;
-        try {
-            executor.execute(() -> {
-                nudgeQueued.set(false);
-                try {
-                    drain();
-                } catch (Throwable t) {
-                    log.warn("Outbox nudge failed: {}", t.toString());
-                }
-            });
-        } catch (RuntimeException e) { // executor closed during shutdown: the poll will pick the row up
-            nudgeQueued.set(false);
-        }
-    }
-
     @Scheduled(initialDelayString = "${virtual-areas.outbox.cleanup-initial-delay:1m}",
             fixedDelayString = "${virtual-areas.outbox.cleanup-interval:1h}")
     void cleanup() {
@@ -131,34 +100,22 @@ public class OutboxRelay {
     // ── Relay ───────────────────────────────────────────────────────────────────
 
     /**
-     * Sends every due event, batch after batch, until nothing is due. Only one drain runs per instance at a
-     * time (a trigger arriving meanwhile makes the running one loop again); other instances are excluded by
-     * SKIP LOCKED + lease.
+     * Sends every due event, batch after batch, until nothing is due. The scheduler runs one poll at a time
+     * per instance; other instances are excluded by SKIP LOCKED + lease.
      *
      * @return number of events delivered
      */
     int drain() {
-        if (!draining.tryLock()) {
-            rerun.set(true);
-            return 0;
-        }
-        try {
-            int delivered = 0;
-            do {
-                rerun.set(false);
-                int batchDelivered;
-                do { // a delivered head may uncover the next event of its entity: claim again
-                    batchDelivered = 0;
-                    for (OutboxRow row : store.claimBatch(props.batchSize(), clock.instant(), props.lease())) {
-                        if (deliver(row)) batchDelivered++;
-                    }
-                    delivered += batchDelivered;
-                } while (batchDelivered > 0);
-            } while (rerun.get());
-            return delivered;
-        } finally {
-            draining.unlock();
-        }
+        int delivered = 0;
+        int batchDelivered;
+        do { // a delivered head may uncover the next event of its entity: claim again
+            batchDelivered = 0;
+            for (OutboxRow row : store.claimBatch(props.batchSize(), clock.instant(), props.lease())) {
+                if (deliver(row)) batchDelivered++;
+            }
+            delivered += batchDelivered;
+        } while (batchDelivered > 0);
+        return delivered;
     }
 
     private boolean deliver(OutboxRow row) {

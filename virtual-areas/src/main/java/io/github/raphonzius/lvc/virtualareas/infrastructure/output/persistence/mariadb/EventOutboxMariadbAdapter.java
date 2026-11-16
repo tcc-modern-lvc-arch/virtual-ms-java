@@ -4,7 +4,6 @@ import io.github.raphonzius.lvc.virtualareas.domain.event.AreaTransitionEvent;
 import io.github.raphonzius.lvc.virtualareas.domain.event.TransitionOutbox;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.grpc.EventHubGrpcAdapter;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.output.grpc.ProtoMapper;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -38,14 +37,12 @@ public class EventOutboxMariadbAdapter implements TransitionOutbox {
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
-    private final ApplicationEventPublisher events;
     private final Clock clock;
 
     public EventOutboxMariadbAdapter(JdbcTemplate jdbc, PlatformTransactionManager txManager,
-                                     ApplicationEventPublisher events, Clock clock) {
+                                     Clock clock) {
         this.jdbc = jdbc;
         this.tx = new TransactionTemplate(txManager);
-        this.events = events;
         this.clock = clock;
     }
 
@@ -60,8 +57,6 @@ public class EventOutboxMariadbAdapter implements TransitionOutbox {
                         """,
                 UUID.randomUUID().toString(), event.areaId(), event.entityId(), event.entityType().name(),
                 ProtoMapper.toEventKind(event).name(), payload, now, now);
-        // delivered after commit when inside a transaction (@TransactionalEventListener), immediately otherwise
-        events.publishEvent(new OutboxEnqueued());
     }
 
     /**
