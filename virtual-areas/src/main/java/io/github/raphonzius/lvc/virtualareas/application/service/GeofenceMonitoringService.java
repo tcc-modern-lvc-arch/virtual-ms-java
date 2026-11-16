@@ -7,28 +7,36 @@ import io.github.raphonzius.lvc.virtualareas.domain.area.MonitoredEntityType;
 import io.github.raphonzius.lvc.virtualareas.domain.entity.EntityState;
 import io.github.raphonzius.lvc.virtualareas.domain.entity.EntityStatePort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.AreaTransitionEvent;
-import io.github.raphonzius.lvc.virtualareas.domain.event.EventDispatchPort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.InfluxProjectionPort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.LvcOrigin;
+import io.github.raphonzius.lvc.virtualareas.domain.event.MissionTarget;
+import io.github.raphonzius.lvc.virtualareas.domain.event.TransitionOutbox;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.Coordinate;
 import io.github.raphonzius.lvc.virtualareas.domain.geofence.GeofenceCalculator;
 import io.github.raphonzius.lvc.virtualareas.domain.poi.PointOfInterestPort;
-import lombok.RequiredArgsConstructor;
+import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.DispatchProperties;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class GeofenceMonitoringService {
 
@@ -37,9 +45,30 @@ public class GeofenceMonitoringService {
 
     private final AreaPort areaPort;
     private final EntityStatePort entityStatePort;
-    private final EventDispatchPort eventDispatchPort;
+    private final TransitionOutbox outbox;
     private final InfluxProjectionPort influxProjectionPort;
     private final PointOfInterestPort poiPort;
+    private final Executor sideEffectExecutor;
+    private final Duration sideEffectTimeout;
+    private final Counter influxFailures;
+
+    public GeofenceMonitoringService(AreaPort areaPort, EntityStatePort entityStatePort,
+                                     TransitionOutbox outbox,
+                                     InfluxProjectionPort influxProjectionPort,
+                                     PointOfInterestPort poiPort,
+                                     @Qualifier("applicationTaskExecutor") Executor applicationTaskExecutor,
+                                     DispatchProperties dispatch,
+                                     MeterRegistry meters) {
+        this.areaPort = areaPort;
+        this.entityStatePort = entityStatePort;
+        this.outbox = outbox;
+        this.influxProjectionPort = influxProjectionPort;
+        this.poiPort = poiPort;
+        this.sideEffectExecutor = applicationTaskExecutor;
+        this.sideEffectTimeout = dispatch.timeout();
+        this.influxFailures = Counter.builder("virtualareas.influx.failures")
+                .description("InfluxDB transition projections that failed or timed out").register(meters);
+    }
 
     @Transactional
     public List<AreaTransitionEvent> processMove(String entityId, MonitoredEntityType entityType,
@@ -78,19 +107,19 @@ public class GeofenceMonitoringService {
             boolean wasInside = currentStates.containsKey(area.id());
 
             if (inside && !wasInside) {
-                Coordinate missionTarget = resolveMissionTarget(area);
+                MissionTarget missionTarget = resolveMissionTarget(area).orElse(null);
                 var event = new AreaTransitionEvent.Checkin(
                         area.id(), area.name(), entityId, entityType, position, lvc, timestamp, missionTarget);
                 transitions.add(event);
                 entityStatePort.upsert(new EntityState(entityId, entityType, area.id(), timestamp, timestamp));
-                dispatchAndRecord(event);
+                recordTransition(event);
 
             } else if (!inside && wasInside) {
                 var event = new AreaTransitionEvent.Checkout(
                         area.id(), area.name(), entityId, entityType, position, lvc, timestamp);
                 transitions.add(event);
                 entityStatePort.remove(entityId, entityType, area.id());
-                dispatchAndRecord(event);
+                recordTransition(event);
 
             } else if (inside) {
                 EntityState existing = currentStates.get(area.id());
@@ -100,32 +129,61 @@ public class GeofenceMonitoringService {
         }
     }
 
-    private Coordinate resolveMissionTarget(Area area) {
-        if (area.action() != AreaAction.MISSION_TRIGGER || area.targetPoiId() == null) return null;
+    private Optional<MissionTarget> resolveMissionTarget(Area area) {
+        if (area.action() != AreaAction.MISSION_TRIGGER || area.targetPoiId() == null) return Optional.empty();
         return poiPort.findById(area.targetPoiId())
-                .map(poi -> poi.coordinate())
-                .orElse(null);
+                .map(poi -> new MissionTarget(poi.id(), poi.name(), poi.coordinate()));
     }
 
-    private void dispatchAndRecord(AreaTransitionEvent event) {
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            Future<?> dispatchTask = executor.submit(() -> eventDispatchPort.dispatch(event));
-            Future<?> influxTask   = executor.submit(() -> influxProjectionPort.writeTransition(event));
-            await(dispatchTask, "event-hub", event.areaId());
-            await(influxTask,   "InfluxDB",  event.areaId());
+    /**
+     * CHECKIN/CHECKOUT go to the transactional outbox (same transaction as the entity-state change, delivered
+     * to event-hub by the relay); the InfluxDB projection is best-effort, fired asynchronously after commit.
+     */
+    private void recordTransition(AreaTransitionEvent event) {
+        outbox.enqueue(event);
+        // ScopedValue bindings do not cross threads (nor survive until afterCommit): capture them here
+        // and re-bind inside the async task.
+        String entityId = ENTITY_ID.get();
+        MonitoredEntityType entityType = ENTITY_TYPE.get();
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    projectToInflux(event, entityId, entityType);
+                }
+            });
+        } else {
+            projectToInflux(event, entityId, entityType);
         }
     }
 
-    private void await(Future<?> future, String target, String areaId) {
+    /** Never throws: the transaction is already committed, so a failure here must not reach the caller. */
+    private void projectToInflux(AreaTransitionEvent event, String entityId, MonitoredEntityType entityType) {
         try {
-            future.get();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("[entity={} type={}] {} interrupted — area={}",
-                    ENTITY_ID.get(), ENTITY_TYPE.get(), target, areaId);
-        } catch (ExecutionException e) {
-            log.error("[entity={} type={}] {} failed — area={}",
-                    ENTITY_ID.get(), ENTITY_TYPE.get(), target, areaId, e.getCause());
+            CompletableFuture
+                    .runAsync(() -> ScopedValue.where(ENTITY_ID, entityId).where(ENTITY_TYPE, entityType)
+                            .run(() -> influxProjectionPort.writeTransition(event)), sideEffectExecutor)
+                    .orTimeout(sideEffectTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .whenComplete((_, failure) -> {
+                        if (failure != null) onInfluxFailure(event, entityId, entityType, failure);
+                    });
+        } catch (RuntimeException e) { // e.g. RejectedExecutionException while shutting down
+            onInfluxFailure(event, entityId, entityType, e);
+        }
+    }
+
+    private void onInfluxFailure(AreaTransitionEvent event, String entityId, MonitoredEntityType entityType,
+                                 Throwable failure) {
+        try {
+            influxFailures.increment();
+            Throwable cause = failure instanceof CompletionException && failure.getCause() != null
+                    ? failure.getCause() : failure;
+            ScopedValue.where(ENTITY_ID, entityId).where(ENTITY_TYPE, entityType).run(() ->
+                    log.error("[entity={} type={}] InfluxDB projection failed — area={}",
+                            ENTITY_ID.get(), ENTITY_TYPE.get(), event.areaId(), cause));
+        } catch (RuntimeException e) {
+            log.error("Failed to report InfluxDB projection failure", e);
         }
     }
 }

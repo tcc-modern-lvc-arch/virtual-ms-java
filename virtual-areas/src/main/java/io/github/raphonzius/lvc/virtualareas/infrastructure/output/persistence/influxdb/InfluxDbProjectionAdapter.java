@@ -10,10 +10,12 @@ import io.github.raphonzius.lvc.virtualareas.domain.event.InfluxProjectionPort;
 import io.github.raphonzius.lvc.virtualareas.domain.event.LvcOrigin;
 import io.github.raphonzius.lvc.virtualareas.domain.event.TransitionRecord;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.InfluxDbProperties;
+import io.github.raphonzius.lvc.virtualareas.infrastructure.support.LogThrottle;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Repository;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
@@ -36,18 +38,28 @@ public class InfluxDbProjectionAdapter implements InfluxProjectionPort {
         return v != null ? v.toString() : "";
     }
 
-    private static MonitoredEntityType entityType(String s) {
+    private final LogThrottle warnThrottle = new LogThrottle(Duration.ofMinutes(1));
+
+    private MonitoredEntityType entityType(String s) {
         try {
             return MonitoredEntityType.valueOf(s);
         } catch (Exception e) {
+            if (warnThrottle.allow("entity_type")) {
+                log.warn("Unknown entity_type '{}' in InfluxDB record, showing it as BUS "
+                        + "(warned at most once a minute)", s);
+            }
             return MonitoredEntityType.BUS;
         }
     }
 
-    private static LvcOrigin lvcOrigin(String s) {
+    private LvcOrigin lvcOrigin(String s) {
         try {
             return LvcOrigin.valueOf(s);
         } catch (Exception e) {
+            if (warnThrottle.allow("lvc")) {
+                log.warn("Unknown lvc '{}' in InfluxDB record, showing it as VIRTUAL "
+                        + "(warned at most once a minute)", s);
+            }
             return LvcOrigin.VIRTUAL;
         }
     }
@@ -55,8 +67,8 @@ public class InfluxDbProjectionAdapter implements InfluxProjectionPort {
     @Override
     public void writeTransition(AreaTransitionEvent event) {
         String transition = switch (event) {
-            case AreaTransitionEvent.Checkin ignored -> "checkin";
-            case AreaTransitionEvent.Checkout ignored -> "checkout";
+            case AreaTransitionEvent.Checkin _ -> "checkin";
+            case AreaTransitionEvent.Checkout _ -> "checkout";
         };
 
         Point point = Point.measurement("area_transitions")

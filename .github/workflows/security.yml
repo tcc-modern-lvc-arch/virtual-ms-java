@@ -1,0 +1,141 @@
+# Workflow de segurança do virtual-ms-java.
+# Gate: zero HIGH/CRITICAL com correção disponível (gate: zero HIGH/CRITICAL com correção disponível).
+#   - trivy fs: vulnerabilidades, segredos e misconfigurações do código-fonte e dos poms.
+#   - trivy image: vulnerabilidades da imagem Docker de virtual-ms-java/virtual-areas (sem push).
+# Exceções: somente as listadas em virtual-ms-java/.trivyignore, se o arquivo existir.
+# proto-shared não está no Maven Central; o build faz checkout dele ao lado do repo
+# (contexto de build = diretório pai, mesmo layout usado pelo Dockerfile).
+name: security-virtual-ms-java
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  schedule:
+    - cron: '43 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-virtual-ms-java-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (mvn verify)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout virtual-ms-java
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: virtual-ms-java
+          persist-credentials: false
+
+      # Repo privado: exige PROTO_SHARED_TOKEN (PAT/fine-grained com leitura). Sem o secret, usa o GITHUB_TOKEN.
+      - name: Checkout proto-shared
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tcc-modern-lvc-arch/proto-shared
+          path: proto-shared
+          token: ${{ secrets.PROTO_SHARED_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Setup JDK 25
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Instalar proto-shared no ~/.m2
+        working-directory: proto-shared
+        run: mvn -B -ntp install
+
+      - name: Build e testes do virtual-ms-java
+        working-directory: virtual-ms-java
+        run: mvn -B -ntp verify
+
+  trivy-fs:
+    name: trivy fs (vuln, secret, misconfig)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout virtual-ms-java
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Não depende do job build: a varredura do código não precisa dos artefatos compilados,
+      # e roda em paralelo para reduzir o tempo total. Qualquer falha ainda bloqueia o PR.
+      - name: Gate trivy fs
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          trivyignores: ${{ hashFiles('.trivyignore') != '' && '.trivyignore' || '' }}
+
+      - name: Relatório SARIF do trivy fs (não bloqueia)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+          format: sarif
+          output: trivy-fs.sarif
+          trivyignores: ${{ hashFiles('.trivyignore') != '' && '.trivyignore' || '' }}
+
+      - name: Upload SARIF (trivy fs)
+        if: always()
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs-virtual-ms-java
+
+  image:
+    name: trivy image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout virtual-ms-java
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: virtual-ms-java
+          persist-credentials: false
+
+      - name: Checkout proto-shared
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tcc-modern-lvc-arch/proto-shared
+          path: proto-shared
+          token: ${{ secrets.PROTO_SHARED_TOKEN || github.token }}
+          persist-credentials: false
+
+      # Contexto de build = diretório pai (contém virtual-ms-java/ e proto-shared/). Sem push.
+      - name: Build da imagem (sem push)
+        run: docker build -f virtual-ms-java/virtual-areas/Dockerfile -t virtual-areas:ci .
+
+      - name: Gate trivy image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: virtual-areas:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          trivyignores: ${{ hashFiles('virtual-ms-java/.trivyignore') != '' && 'virtual-ms-java/.trivyignore' || '' }}

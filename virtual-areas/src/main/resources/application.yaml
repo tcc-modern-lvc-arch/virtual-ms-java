@@ -4,11 +4,17 @@ spring:
   threads:
     virtual:
       enabled: true
+  task:
+    execution:
+      shutdown:
+        await-termination: true
+        await-termination-period: 30s
 
   datasource:
     url: jdbc:mariadb://${MARIADB_HOST:localhost}:3306/virtual_areas
-    username: virtual_areas
-    password: tcc-virtual-areas
+    username: ${MARIADB_USER:virtual_areas}
+    # dev default kept for the local compose; override via MARIADB_PASSWORD outside dev
+    password: ${MARIADB_PASSWORD:tcc-virtual-areas}
     driver-class-name: org.mariadb.jdbc.Driver
 
   jpa:
@@ -29,17 +35,45 @@ spring:
   grpc:
     server:
       port: 50052
+    client:
+      channel:
+        event-hub:
+          # EVENTHUB_HOST / EVENTHUB_PORT kept for docker-compose compatibility
+          target: static://${EVENTHUB_HOST:localhost}:${EVENTHUB_PORT:50051}
+          keepalive:
+            time: 60s
+            timeout: 10s
+            without-calls: false
 
 server:
   port: 8082
 
 eventhub:
   grpc:
-    host: ${EVENTHUB_HOST:localhost}
-    port: ${EVENTHUB_PORT:50051}
+    deadline: ${EVENTHUB_DEADLINE:2s}
+    reconnect-initial-backoff: 1s
+    reconnect-max-backoff: 30s
+    # backoff resets only if the stream lived at least this long (not per message)
+    reconnect-reset-after: 30s
+
+virtual-areas:
+  dispatch:
+    # max duration of the (async, best-effort) InfluxDB projection of one transition;
+    # CHECKIN/CHECKOUT delivery to event-hub goes through the outbox below
+    timeout: ${DISPATCH_TIMEOUT:5s}
+  outbox:
+    poll-interval: ${OUTBOX_POLL_INTERVAL:500ms}
+    initial-delay: 5s            # keeps the relay quiet during startup
+    batch-size: 50
+    backoff-initial: 1s          # retry delay doubles per attempt ...
+    backoff-max: 5m              # ... up to this ceiling
+    lease: 60s                   # claimed rows stay invisible this long (crash recovery)
+    retention: ${OUTBOX_RETENTION:7d}   # sent rows older than this are deleted
+    cleanup-interval: 1h
 
 influxdb:
   url: ${INFLUXDB_URL:http://localhost:8086}
+  # dev default kept for the local compose; override via INFLUXDB_TOKEN outside dev
   token: ${INFLUXDB_TOKEN:tcc-local-super-secret-token}
   org: ${INFLUXDB_ORG:tcc-org}
   bucket: ${INFLUXDB_BUCKET:projections}
@@ -54,3 +88,14 @@ vaadin:
   push-mode: AUTOMATIC
   launch-browser: false
   production-mode: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never

@@ -5,12 +5,10 @@ import com.influxdb.client.InfluxDBClientFactory;
 import com.influxdb.client.QueryApi;
 import com.influxdb.client.WriteApiBlocking;
 import io.github.raphonzius.lvc.virtualareas.infrastructure.config.properties.InfluxDbProperties;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-@EnableConfigurationProperties(InfluxDbProperties.class)
 public class InfluxDbConfiguration {
 
     @Bean

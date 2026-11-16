@@ -15,11 +15,11 @@
     <name>Virtual Areas App</name>
 
     <properties>
-        <springdoc.version>3.0.2</springdoc.version>
-        <influxdb.version>7.2.0</influxdb.version>
+        <springdoc.version>3.2.0</springdoc.version>
+        <influxdb.version>7.5.0</influxdb.version>
         <jts.version>1.20.0</jts.version>
-        <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
-    </properties>
+        <poi.version>5.5.1</poi.version>
+            </properties>
 
     <dependencies>
         <!-- ── Spring Boot ─────────────────────────────────────────────────── -->
@@ -31,17 +31,23 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-jpa</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
 
         <!-- ── gRPC — spring-grpc (server auto-config) + raw grpc-java client ─ -->
         <dependency>
-            <groupId>org.springframework.grpc</groupId>
-            <artifactId>spring-grpc-spring-boot-starter</artifactId>
-            <version>${spring.grpc.version}</version>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-grpc-server</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-grpc-client</artifactId>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-netty-shaded</artifactId>
-            <version>${grpc.version}</version>
         </dependency>
 
         <!-- ── Generated proto stubs ───────────────────────────────────────── -->
@@ -105,7 +111,7 @@
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi-ooxml</artifactId>
-            <version>5.3.0</version>
+            <version>${poi.version}</version>
         </dependency>
 
         <!-- ── Lombok ──────────────────────────────────────────────────────── -->
@@ -122,9 +128,19 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.springframework.grpc</groupId>
-            <artifactId>spring-grpc-test</artifactId>
-            <version>${spring.grpc.version}</version>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-grpc-server-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Real MariaDB for the outbox relay (FOR UPDATE SKIP LOCKED); versions from the Boot BOM -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mariadb</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -145,7 +161,6 @@
                     </execution>
                 </executions>
                 <configuration>
-                    <jvmArguments>--enable-preview</jvmArguments>
                     <excludes>
                         <exclude>
                             <groupId>org.projectlombok</groupId>
@@ -171,7 +186,7 @@
             <plugin>
                 <groupId>org.flywaydb</groupId>
                 <artifactId>flyway-maven-plugin</artifactId>
-                <version>11.8.2</version>
+                <version>${flyway.version}</version>
                 <configuration>
                     <url>jdbc:mariadb://localhost:3306/virtual_areas</url>
                     <user>virtual_areas</user>
@@ -184,12 +199,12 @@
                     <dependency>
                         <groupId>org.mariadb.jdbc</groupId>
                         <artifactId>mariadb-java-client</artifactId>
-                        <version>3.5.3</version>
+                        <version>${mariadb.version}</version>
                     </dependency>
                     <dependency>
                         <groupId>org.flywaydb</groupId>
                         <artifactId>flyway-mysql</artifactId>
-                        <version>11.8.2</version>
+                        <version>${flyway.version}</version>
                     </dependency>
                 </dependencies>
             </plugin>
@@ -197,12 +212,8 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>${maven-compiler-plugin.version}</version>
                 <configuration>
                     <release>${java.version}</release>
-                    <compilerArgs>
-                        <arg>--enable-preview</arg>
-                    </compilerArgs>
                     <annotationProcessorPaths>
                         <path>
                             <groupId>org.projectlombok</groupId>
